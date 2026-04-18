@@ -973,23 +973,60 @@ ephyrProcessButtonRelease(xcb_generic_event_t *xev)
     KdEnqueuePointerEvent(ephyrMouse, mouseState | KD_MOUSE_DELTA, 0, 0, 0);
 }
 
+static Bool ephyrHostGrabToggleArmed = FALSE;
+
 static Bool
-ephyrHostGrabToggleRequested(xcb_key_symbols_t *keysyms,
-                             xcb_key_release_event_t *key)
+ephyrHostGrabToggleKey(xcb_keysym_t keysym)
+{
+    return keysym == XK_space ||
+           keysym == XK_Shift_L ||
+           keysym == XK_Shift_R ||
+           keysym == XK_Control_L ||
+           keysym == XK_Control_R;
+}
+
+static void
+ephyrHostGrabArmToggleOnPress(xcb_key_symbols_t *keysyms,
+                              xcb_key_press_event_t *key)
 {
     xcb_keysym_t keysym = xcb_key_symbols_get_keysym(keysyms, key->detail, 0);
     unsigned int required_mods = XCB_MOD_MASK_CONTROL | XCB_MOD_MASK_SHIFT;
     unsigned int disallowed_mods = XCB_MOD_MASK_1;
 
-    return keysym == XK_space &&
-           (key->state & required_mods) == required_mods &&
-           !(key->state & disallowed_mods);
+    if (keysym == XK_space &&
+        (key->state & required_mods) == required_mods &&
+        !(key->state & disallowed_mods)) {
+        ephyrHostGrabToggleArmed = TRUE;
+    }
+}
+
+static Bool
+ephyrHostGrabToggleRequested(xcb_key_symbols_t *keysyms,
+                             xcb_key_release_event_t *key)
+{
+    xcb_keysym_t keysym = xcb_key_symbols_get_keysym(keysyms, key->detail, 0);
+    Bool should_toggle = ephyrHostGrabToggleArmed && ephyrHostGrabToggleKey(keysym);
+
+    if (should_toggle)
+        ephyrHostGrabToggleArmed = FALSE;
+    else if (keysym == XK_space)
+        ephyrHostGrabToggleArmed = FALSE;
+
+    return should_toggle;
 }
 
 static void
 ephyrProcessKeyPress(xcb_generic_event_t *xev)
 {
+    xcb_connection_t *conn = hostx_get_xcbconn();
     xcb_key_press_event_t *key = (xcb_key_press_event_t *)xev;
+    static xcb_key_symbols_t *keysyms;
+
+    if (!keysyms)
+        keysyms = xcb_key_symbols_alloc(conn);
+
+    if (!EphyrWantNoHostGrab)
+        ephyrHostGrabArmToggleOnPress(keysyms, key);
 
     if (!ephyrKbd ||
         !((EphyrKbdPrivate *) ephyrKbd->driverPrivate)->enabled) {
