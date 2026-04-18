@@ -54,6 +54,62 @@ Bool ephyrNoXV = FALSE;
 #define EPHYR_HOST_UNGRAB_MESSAGE "(ctrl+shift+space releases mouse and keyboard)"
 
 static int mouseState = 0;
+static Bool ephyrHostGrabToggleArmed = FALSE;
+static int ephyrHostGrabbedScreen = -1;
+
+static Bool
+EphyrToggleDebugEnabled(void)
+{
+    static int initialized = FALSE;
+    static Bool enabled = FALSE;
+
+    if (!initialized) {
+        enabled = getenv("XEPHYR_TOGGLE_DEBUG") != NULL;
+        initialized = TRUE;
+    }
+
+    return enabled;
+}
+
+static void
+EphyrLogHostFocus(xcb_connection_t *conn, const char *prefix)
+{
+    xcb_get_input_focus_cookie_t cookie;
+    xcb_get_input_focus_reply_t *reply;
+
+    if (!EphyrToggleDebugEnabled())
+        return;
+
+    cookie = xcb_get_input_focus(conn);
+    reply = xcb_get_input_focus_reply(conn, cookie, NULL);
+    if (!reply) {
+        ErrorF("XEPHYR_TOGGLE_DEBUG %s focus=<no-reply> armed=%d grabbed_screen=%d\n",
+               prefix, ephyrHostGrabToggleArmed, ephyrHostGrabbedScreen);
+        return;
+    }
+
+    ErrorF("XEPHYR_TOGGLE_DEBUG %s focus=0x%x revert=%u armed=%d grabbed_screen=%d\n",
+           prefix, reply->focus, reply->revert_to,
+           ephyrHostGrabToggleArmed, ephyrHostGrabbedScreen);
+    free(reply);
+}
+
+static void
+EphyrLogToggleKeyEvent(const char *kind,
+                       xcb_connection_t *conn,
+                       xcb_keysym_t keysym,
+                       xcb_window_t event,
+                       uint8_t detail,
+                       uint16_t state)
+{
+    if (!EphyrToggleDebugEnabled())
+        return;
+
+    ErrorF("XEPHYR_TOGGLE_DEBUG %s event=0x%x detail=%u keysym=0x%x state=0x%x armed=%d grabbed_screen=%d\n",
+           kind, event, detail, keysym, state,
+           ephyrHostGrabToggleArmed, ephyrHostGrabbedScreen);
+    EphyrLogHostFocus(conn, "after-key-event");
+}
 static Rotation ephyrRandr = RR_Rotate_0;
 
 typedef struct _EphyrInputPrivate {
@@ -973,8 +1029,6 @@ ephyrProcessButtonRelease(xcb_generic_event_t *xev)
     KdEnqueuePointerEvent(ephyrMouse, mouseState | KD_MOUSE_DELTA, 0, 0, 0);
 }
 
-static Bool ephyrHostGrabToggleArmed = FALSE;
-
 static Bool
 ephyrHostGrabToggleKey(xcb_keysym_t keysym)
 {
@@ -986,31 +1040,50 @@ ephyrHostGrabToggleKey(xcb_keysym_t keysym)
 }
 
 static void
-ephyrHostGrabArmToggleOnPress(xcb_key_symbols_t *keysyms,
+ephyrHostGrabArmToggleOnPress(xcb_connection_t *conn,
+                              xcb_key_symbols_t *keysyms,
                               xcb_key_press_event_t *key)
 {
     xcb_keysym_t keysym = xcb_key_symbols_get_keysym(keysyms, key->detail, 0);
     unsigned int required_mods = XCB_MOD_MASK_CONTROL | XCB_MOD_MASK_SHIFT;
     unsigned int disallowed_mods = XCB_MOD_MASK_1;
 
+    EphyrLogToggleKeyEvent("key-press", conn, keysym, key->event,
+                           key->detail, key->state);
+
     if (keysym == XK_space &&
         (key->state & required_mods) == required_mods &&
         !(key->state & disallowed_mods)) {
         ephyrHostGrabToggleArmed = TRUE;
+        if (EphyrToggleDebugEnabled())
+            ErrorF("XEPHYR_TOGGLE_DEBUG armed-on-press event=0x%x state=0x%x\n",
+                   key->event, key->state);
     }
 }
 
 static Bool
-ephyrHostGrabToggleRequested(xcb_key_symbols_t *keysyms,
+ephyrHostGrabToggleRequested(xcb_connection_t *conn,
+                             xcb_key_symbols_t *keysyms,
                              xcb_key_release_event_t *key)
 {
     xcb_keysym_t keysym = xcb_key_symbols_get_keysym(keysyms, key->detail, 0);
     Bool should_toggle = ephyrHostGrabToggleArmed && ephyrHostGrabToggleKey(keysym);
 
-    if (should_toggle)
+    EphyrLogToggleKeyEvent("key-release", conn, keysym, key->event,
+                           key->detail, key->state);
+
+    if (should_toggle) {
+        if (EphyrToggleDebugEnabled())
+            ErrorF("XEPHYR_TOGGLE_DEBUG toggle-requested event=0x%x keysym=0x%x state=0x%x\n",
+                   key->event, keysym, key->state);
         ephyrHostGrabToggleArmed = FALSE;
-    else if (keysym == XK_space)
+    }
+    else if (keysym == XK_space) {
+        if (EphyrToggleDebugEnabled())
+            ErrorF("XEPHYR_TOGGLE_DEBUG disarmed-on-space-release event=0x%x state=0x%x\n",
+                   key->event, key->state);
         ephyrHostGrabToggleArmed = FALSE;
+    }
 
     return should_toggle;
 }
@@ -1026,7 +1099,7 @@ ephyrProcessKeyPress(xcb_generic_event_t *xev)
         keysyms = xcb_key_symbols_alloc(conn);
 
     if (!EphyrWantNoHostGrab)
-        ephyrHostGrabArmToggleOnPress(keysyms, key);
+        ephyrHostGrabArmToggleOnPress(conn, keysyms, key);
 
     if (!ephyrKbd ||
         !((EphyrKbdPrivate *) ephyrKbd->driverPrivate)->enabled) {
@@ -1043,20 +1116,23 @@ ephyrProcessKeyRelease(xcb_generic_event_t *xev)
     xcb_connection_t *conn = hostx_get_xcbconn();
     xcb_key_release_event_t *key = (xcb_key_release_event_t *)xev;
     static xcb_key_symbols_t *keysyms;
-    static int grabbed_screen = -1;
 
     if (!keysyms)
         keysyms = xcb_key_symbols_alloc(conn);
 
-    if (!EphyrWantNoHostGrab && ephyrHostGrabToggleRequested(keysyms, key)) {
+    if (!EphyrWantNoHostGrab && ephyrHostGrabToggleRequested(conn, keysyms, key)) {
         KdScreenInfo *screen = screen_from_window(key->event);
         EphyrScrPriv *scrpriv = screen->driver;
 
-        if (grabbed_screen != -1) {
+        if (ephyrHostGrabbedScreen != -1) {
+            if (EphyrToggleDebugEnabled())
+                ErrorF("XEPHYR_TOGGLE_DEBUG ungrab-request screen=%d event=0x%x\n",
+                       ephyrHostGrabbedScreen, key->event);
             xcb_ungrab_keyboard(conn, XCB_TIME_CURRENT_TIME);
             xcb_ungrab_pointer(conn, XCB_TIME_CURRENT_TIME);
-            grabbed_screen = -1;
+            ephyrHostGrabbedScreen = -1;
             hostx_set_win_title(screen, EPHYR_HOST_GRAB_MESSAGE);
+            EphyrLogHostFocus(conn, "after-ungrab");
         }
         else {
             /* Attempt grab */
@@ -1080,18 +1156,31 @@ ephyrProcessKeyRelease(xcb_generic_event_t *xev)
                                  XCB_TIME_CURRENT_TIME);
             xcb_grab_pointer_reply_t *pgrabr;
             kbgrabr = xcb_grab_keyboard_reply(conn, kbgrabc, NULL);
+            if (EphyrToggleDebugEnabled())
+                ErrorF("XEPHYR_TOGGLE_DEBUG grab-keyboard status=%d event=0x%x win=0x%x\n",
+                       kbgrabr ? kbgrabr->status : -1, key->event, scrpriv->win);
             if (!kbgrabr || kbgrabr->status != XCB_GRAB_STATUS_SUCCESS) {
                 xcb_discard_reply(conn, pgrabc.sequence);
                 xcb_ungrab_pointer(conn, XCB_TIME_CURRENT_TIME);
+                EphyrLogHostFocus(conn, "after-grab-keyboard-fail");
             } else {
                 pgrabr = xcb_grab_pointer_reply(conn, pgrabc, NULL);
+                if (EphyrToggleDebugEnabled())
+                    ErrorF("XEPHYR_TOGGLE_DEBUG grab-pointer status=%d event=0x%x win=0x%x\n",
+                           pgrabr ? pgrabr->status : -1, key->event, scrpriv->win);
                 if (!pgrabr || pgrabr->status != XCB_GRAB_STATUS_SUCCESS)
                     {
                         xcb_ungrab_keyboard(conn,
                                             XCB_TIME_CURRENT_TIME);
+                        EphyrLogHostFocus(conn, "after-grab-pointer-fail");
                     } else {
-                    grabbed_screen = scrpriv->mynum;
+                    ephyrHostGrabbedScreen = scrpriv->mynum;
+                    xcb_set_input_focus(conn,
+                                        XCB_INPUT_FOCUS_POINTER_ROOT,
+                                        scrpriv->win,
+                                        XCB_TIME_CURRENT_TIME);
                     hostx_set_win_title(screen, EPHYR_HOST_UNGRAB_MESSAGE);
+                    EphyrLogHostFocus(conn, "after-grab-success");
                 }
             }
         }
@@ -1180,6 +1269,28 @@ ephyrXcbProcessEvents(Bool queued_only)
 
         case XCB_BUTTON_RELEASE:
             ephyrProcessButtonRelease(xev);
+            break;
+
+        case XCB_FOCUS_IN:
+        case XCB_FOCUS_OUT:
+            if (EphyrToggleDebugEnabled()) {
+                xcb_focus_in_event_t *focus = (xcb_focus_in_event_t *)xev;
+                ErrorF("XEPHYR_TOGGLE_DEBUG %s event=0x%x mode=%u detail=%u\n",
+                       ((xev->response_type & 0x7f) == XCB_FOCUS_IN) ? "focus-in" : "focus-out",
+                       focus->event, focus->mode, focus->detail);
+                EphyrLogHostFocus(conn, "focus-event");
+            }
+            break;
+
+        case XCB_ENTER_NOTIFY:
+        case XCB_LEAVE_NOTIFY:
+            if (EphyrToggleDebugEnabled()) {
+                xcb_enter_notify_event_t *crossing = (xcb_enter_notify_event_t *)xev;
+                ErrorF("XEPHYR_TOGGLE_DEBUG %s event=0x%x mode=%u detail=%u state=0x%x same-screen-focus=%u\n",
+                       ((xev->response_type & 0x7f) == XCB_ENTER_NOTIFY) ? "enter" : "leave",
+                       crossing->event, crossing->mode, crossing->detail,
+                       crossing->state, crossing->same_screen_focus);
+            }
             break;
 
         case XCB_CONFIGURE_NOTIFY:
