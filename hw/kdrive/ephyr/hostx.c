@@ -639,7 +639,7 @@ hostx_init(void)
                               attrs);
 
             hostx_set_win_title(screen,
-                                "(ctrl+shift grabs mouse and keyboard)");
+                                "(ctrl+shift+space grabs mouse and keyboard)");
 
             if (HostX.use_fullscreen) {
                 scrpriv->win_width  = xscreen->width_in_pixels;

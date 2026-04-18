@@ -50,6 +50,9 @@ KdPointerInfo *ephyrMouse;
 Bool ephyrNoDRI = FALSE;
 Bool ephyrNoXV = FALSE;
 
+#define EPHYR_HOST_GRAB_MESSAGE "(ctrl+shift+space grabs mouse and keyboard)"
+#define EPHYR_HOST_UNGRAB_MESSAGE "(ctrl+shift+space releases mouse and keyboard)"
+
 static int mouseState = 0;
 static Rotation ephyrRandr = RR_Rotate_0;
 
@@ -658,7 +661,7 @@ ephyrInitScreen(ScreenPtr pScreen)
     if (EphyrWantNoHostGrab) {
         hostx_set_win_title(screen, "xephyr");
     } else {
-        hostx_set_win_title(screen, "(ctrl+shift grabs mouse and keyboard)");
+        hostx_set_win_title(screen, EPHYR_HOST_GRAB_MESSAGE);
     }
     pScreen->CreateColormap = ephyrCreateColormap;
 
@@ -970,27 +973,17 @@ ephyrProcessButtonRelease(xcb_generic_event_t *xev)
     KdEnqueuePointerEvent(ephyrMouse, mouseState | KD_MOUSE_DELTA, 0, 0, 0);
 }
 
-/* Xephyr wants ctrl+shift to grab the window, but that conflicts with
-   ctrl+alt+shift key combos. Remember the modifier state on key presses and
-   releases, if mod1 is pressed, we need ctrl, shift and mod1 released
-   before we allow a shift-ctrl grab activation.
-
-   note: a key event contains the mask _before_ the current key takes
-   effect, so mod1_was_down will be reset on the first key press after all
-   three were released, not on the last release. That'd require some more
-   effort.
- */
-static int
-ephyrUpdateGrabModifierState(int state)
+static Bool
+ephyrHostGrabToggleRequested(xcb_key_symbols_t *keysyms,
+                             xcb_key_release_event_t *key)
 {
-    static int mod1_was_down = 0;
+    xcb_keysym_t keysym = xcb_key_symbols_get_keysym(keysyms, key->detail, 0);
+    unsigned int required_mods = XCB_MOD_MASK_CONTROL | XCB_MOD_MASK_SHIFT;
+    unsigned int disallowed_mods = XCB_MOD_MASK_1;
 
-    if ((state & (XCB_MOD_MASK_CONTROL|XCB_MOD_MASK_SHIFT|XCB_MOD_MASK_1)) == 0)
-        mod1_was_down = 0;
-    else if (state & XCB_MOD_MASK_1)
-        mod1_was_down = 1;
-
-    return mod1_was_down;
+    return keysym == XK_space &&
+           (key->state & required_mods) == required_mods &&
+           !(key->state & disallowed_mods);
 }
 
 static void
@@ -1003,7 +996,6 @@ ephyrProcessKeyPress(xcb_generic_event_t *xev)
         return;
     }
 
-    ephyrUpdateGrabModifierState(key->state);
     ephyrUpdateModifierState(key->state);
     KdEnqueueKeyboardEvent(ephyrKbd, key->detail, FALSE);
 }
@@ -1015,18 +1007,11 @@ ephyrProcessKeyRelease(xcb_generic_event_t *xev)
     xcb_key_release_event_t *key = (xcb_key_release_event_t *)xev;
     static xcb_key_symbols_t *keysyms;
     static int grabbed_screen = -1;
-    int mod1_down = ephyrUpdateGrabModifierState(key->state);
 
     if (!keysyms)
         keysyms = xcb_key_symbols_alloc(conn);
 
-    if (!EphyrWantNoHostGrab &&
-        (((xcb_key_symbols_get_keysym(keysyms, key->detail, 0) == XK_Shift_L
-          || xcb_key_symbols_get_keysym(keysyms, key->detail, 0) == XK_Shift_R)
-         && (key->state & XCB_MOD_MASK_CONTROL)) ||
-        ((xcb_key_symbols_get_keysym(keysyms, key->detail, 0) == XK_Control_L
-          || xcb_key_symbols_get_keysym(keysyms, key->detail, 0) == XK_Control_R)
-         && (key->state & XCB_MOD_MASK_SHIFT)))) {
+    if (!EphyrWantNoHostGrab && ephyrHostGrabToggleRequested(keysyms, key)) {
         KdScreenInfo *screen = screen_from_window(key->event);
         EphyrScrPriv *scrpriv = screen->driver;
 
@@ -1034,10 +1019,9 @@ ephyrProcessKeyRelease(xcb_generic_event_t *xev)
             xcb_ungrab_keyboard(conn, XCB_TIME_CURRENT_TIME);
             xcb_ungrab_pointer(conn, XCB_TIME_CURRENT_TIME);
             grabbed_screen = -1;
-            hostx_set_win_title(screen,
-                                "(ctrl+shift grabs mouse and keyboard)");
+            hostx_set_win_title(screen, EPHYR_HOST_GRAB_MESSAGE);
         }
-        else if (!mod1_down) {
+        else {
             /* Attempt grab */
             xcb_grab_keyboard_cookie_t kbgrabc =
                 xcb_grab_keyboard(conn,
@@ -1070,9 +1054,7 @@ ephyrProcessKeyRelease(xcb_generic_event_t *xev)
                                             XCB_TIME_CURRENT_TIME);
                     } else {
                     grabbed_screen = scrpriv->mynum;
-                    hostx_set_win_title
-                        (screen,
-                         "(ctrl+shift releases mouse and keyboard)");
+                    hostx_set_win_title(screen, EPHYR_HOST_UNGRAB_MESSAGE);
                 }
             }
         }
