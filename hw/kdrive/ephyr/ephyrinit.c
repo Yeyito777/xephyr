@@ -33,7 +33,6 @@
 extern Window EphyrPreExistingHostWin;
 extern Bool EphyrWantGrayScale;
 extern Bool EphyrWantResize;
-extern Bool EphyrWantNoHostGrab;
 extern Bool kdHasPointer;
 extern Bool kdHasKbd;
 extern Bool ephyr_glamor, ephyr_glamor_gles2, ephyr_glamor_skip_present;
@@ -138,7 +137,6 @@ ddxUseMsg(void)
     ErrorF("-name [name]         define the name in the WM_CLASS property\n");
     ErrorF
         ("-title [title]       set the window title in the WM_NAME property\n");
-    ErrorF("-no-host-grab        Disable grabbing the keyboard and mouse.\n");
     ErrorF("\n");
 }
 
@@ -339,10 +337,6 @@ ddxProcessArgument(int argc, char **argv, int i)
         return 2;
     }
     /* end Xnest compat */
-    else if (!strcmp(argv[i], "-no-host-grab")) {
-        EphyrWantNoHostGrab = 1;
-        return 1;
-    }
     else if (!strcmp(argv[i], "-sharevts") ||
              !strcmp(argv[i], "-novtswitch")) {
         return 1;

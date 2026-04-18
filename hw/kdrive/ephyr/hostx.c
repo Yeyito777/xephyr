@@ -641,8 +641,7 @@ hostx_init(void)
                               attr_mask,
                               attrs);
 
-            hostx_set_win_title(screen,
-                                "(ctrl+shift+space grabs mouse and keyboard)");
+            hostx_set_win_title(screen, "");
 
             if (HostX.use_fullscreen) {
                 scrpriv->win_width  = xscreen->width_in_pixels;
