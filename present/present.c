@@ -21,6 +21,8 @@
  */
 
 #include "present_priv.h"
+
+extern Bool ephyr_dri3_refresh_pixmap(PixmapPtr pixmap) __attribute__((weak));
 #include <gcstruct.h>
 
 uint32_t
@@ -84,6 +86,8 @@ present_copy_region(DrawablePtr drawable,
         (*gc->funcs->ChangeClip)(gc, CT_REGION, update, 0);
     }
     ValidateGC(drawable, gc);
+    if (ephyr_dri3_refresh_pixmap)
+        ephyr_dri3_refresh_pixmap(pixmap);
     (*gc->ops->CopyArea)(&pixmap->drawable,
                          drawable,
                          gc,

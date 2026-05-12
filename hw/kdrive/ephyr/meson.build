@@ -1,5 +1,6 @@
 srcs = [
     'ephyr.c',
+    'ephyr_dri3.c',
     'ephyrinit.c',
     'ephyrcursor.c',
     'ephyr_draw.c',
@@ -31,6 +32,11 @@ if build_glamor
     xephyr_glamor += glamor_egl_stubs
     xephyr_dep += dependency('x11-xcb')
     xephyr_dep += epoxy_dep
+endif
+
+if build_dri3
+    xephyr_dep += libdrm_dep
+    xephyr_dep += dependency('gbm', version: gbm_req)
 endif
 
 if build_xv

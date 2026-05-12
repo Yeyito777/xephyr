@@ -689,6 +689,10 @@ ephyrFinishInitScreen(ScreenPtr pScreen)
         return FALSE;
 #endif
 
+#if defined(DRI3) && !defined(GLAMOR)
+    ephyr_dri3_screen_init(pScreen);
+#endif
+
     scrpriv->BlockHandler = pScreen->BlockHandler;
     pScreen->BlockHandler = ephyrScreenBlockHandler;
 

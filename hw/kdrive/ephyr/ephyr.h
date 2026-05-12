@@ -219,6 +219,10 @@ void ephyr_glamor_disable(ScreenPtr pScreen);
 void ephyr_glamor_fini(ScreenPtr pScreen);
 void ephyr_glamor_host_paint_rect(ScreenPtr pScreen);
 
+/* DRI3 render-node support */
+Bool ephyr_dri3_screen_init(ScreenPtr screen);
+Bool ephyr_dri3_refresh_pixmap(PixmapPtr pixmap);
+
 /*ephyvideo.c*/
 
 Bool ephyrInitVideo(ScreenPtr pScreen);
