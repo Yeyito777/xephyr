@@ -122,6 +122,9 @@ hostx_set_screen_number(KdScreenInfo *screen, int number);
 void
 hostx_set_win_title(KdScreenInfo *screen, const char *extra_text);
 
+void
+hostx_warp_pointer(ScreenPtr pScreen, int x, int y);
+
 int
  hostx_get_depth(void);
 

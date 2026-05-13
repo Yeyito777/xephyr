@@ -822,6 +822,7 @@ ephyrWarpCursor(DeviceIntPtr pDev, ScreenPtr pScreen, int x, int y)
     input_lock();
     ephyrCursorScreen = pScreen;
     miPointerWarpCursor(inputInfo.pointer, pScreen, x, y);
+    hostx_warp_pointer(pScreen, x, y);
 
     input_unlock();
 }

@@ -200,6 +200,30 @@ hostx_set_win_title(KdScreenInfo *screen, const char *extra_text)
     }
 }
 
+void
+hostx_warp_pointer(ScreenPtr pScreen, int x, int y)
+{
+    KdScreenPriv(pScreen);
+    KdScreenInfo *kd_screen = pScreenPriv->screen;
+    EphyrScrPriv *scrpriv = kd_screen->driver;
+
+    if (!scrpriv)
+        return;
+
+    if (x < 0)
+        x = 0;
+    if (y < 0)
+        y = 0;
+    if (x >= scrpriv->win_width)
+        x = scrpriv->win_width - 1;
+    if (y >= scrpriv->win_height)
+        y = scrpriv->win_height - 1;
+
+    xcb_warp_pointer(HostX.conn, XCB_NONE, scrpriv->win,
+                     0, 0, 0, 0, x, y);
+    xcb_flush(HostX.conn);
+}
+
 int
 hostx_want_host_cursor(void)
 {
