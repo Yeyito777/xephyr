@@ -1014,6 +1014,66 @@ ephyrProcessConfigureNotify(xcb_generic_event_t *xev)
 }
 
 static void
+ephyrProcessFocusIn(xcb_generic_event_t *xev)
+{
+    xcb_focus_in_event_t *focus = (xcb_focus_in_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(focus->event);
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return;
+
+    scrpriv = screen->driver;
+    if (scrpriv)
+        scrpriv->host_window_focused = TRUE;
+}
+
+static void
+ephyrProcessFocusOut(xcb_generic_event_t *xev)
+{
+    xcb_focus_out_event_t *focus = (xcb_focus_out_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(focus->event);
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return;
+
+    scrpriv = screen->driver;
+    if (scrpriv)
+        scrpriv->host_window_focused = FALSE;
+}
+
+static void
+ephyrProcessEnterNotify(xcb_generic_event_t *xev)
+{
+    xcb_enter_notify_event_t *enter = (xcb_enter_notify_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(enter->event);
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return;
+
+    scrpriv = screen->driver;
+    if (scrpriv)
+        scrpriv->host_pointer_inside = TRUE;
+}
+
+static void
+ephyrProcessLeaveNotify(xcb_generic_event_t *xev)
+{
+    xcb_leave_notify_event_t *leave = (xcb_leave_notify_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(leave->event);
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return;
+
+    scrpriv = screen->driver;
+    if (scrpriv)
+        scrpriv->host_pointer_inside = FALSE;
+}
+
+static void
 ephyrXcbProcessEvents(Bool queued_only)
 {
     xcb_connection_t *conn = hostx_get_xcbconn();
@@ -1070,6 +1130,22 @@ ephyrXcbProcessEvents(Bool queued_only)
             free(configure);
             configure = xev;
             xev = NULL;
+            break;
+
+        case XCB_FOCUS_IN:
+            ephyrProcessFocusIn(xev);
+            break;
+
+        case XCB_FOCUS_OUT:
+            ephyrProcessFocusOut(xev);
+            break;
+
+        case XCB_ENTER_NOTIFY:
+            ephyrProcessEnterNotify(xev);
+            break;
+
+        case XCB_LEAVE_NOTIFY:
+            ephyrProcessLeaveNotify(xev);
             break;
         }
 

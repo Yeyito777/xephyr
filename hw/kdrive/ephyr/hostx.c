@@ -210,6 +210,9 @@ hostx_warp_pointer(ScreenPtr pScreen, int x, int y)
     if (!scrpriv)
         return;
 
+    if (!scrpriv->host_window_focused || !scrpriv->host_pointer_inside)
+        return;
+
     if (x < 0)
         x = 0;
     if (y < 0)
