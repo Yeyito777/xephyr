@@ -80,3 +80,6 @@ core
 doltcompile
 doltlibtool
 xserver.ent
+
+# Local installed-binary backups created while testing Xephyr builds
+.local-xephyr-backups/
