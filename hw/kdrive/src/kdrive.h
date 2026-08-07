@@ -202,6 +202,8 @@ struct _KdPointerInfo {
         int z;
         int flags;
         int absrel;
+        Bool has_unaccelerated;
+        double unaccelerated[3];
     } heldEvent;
     unsigned char buttonState;
     Bool transformCoordinates;
@@ -396,6 +398,11 @@ KdEnqueueKeyboardEvent(KdKeyboardInfo * ki, unsigned char scan_code,
 void
 KdEnqueuePointerEvent(KdPointerInfo * pi, unsigned long flags, int rx, int ry,
                       int rz);
+
+void
+KdEnqueuePointerMotionWithRawDeltas(KdPointerInfo * pi, unsigned long flags,
+                                    int rx, int ry, int rz,
+                                    int raw_rx, int raw_ry, int raw_rz);
 
 void
  KdSetPointerMatrix(KdPointerMatrix *pointer);

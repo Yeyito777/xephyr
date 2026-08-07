@@ -60,6 +60,16 @@ typedef struct _ephyrFakexaPriv {
     GCPtr pGC;
 } EphyrFakexaPriv;
 
+#define EPHYR_HOST_POINTER_WARP_SLOTS 8
+
+typedef struct _EphyrHostPointerWarp {
+    Bool active;
+    CARD16 sequence;
+    int x;
+    int y;
+    CARD32 deadline;
+} EphyrHostPointerWarp;
+
 typedef struct _ephyrScrPriv {
     /* ephyr server info */
     Rotation randr;
@@ -76,8 +86,21 @@ typedef struct _ephyrScrPriv {
     int win_x, win_y;
     int win_width, win_height;
     int server_depth;
-    Bool host_window_focused;
-    Bool host_pointer_inside;
+
+    /*
+     * Host pointer warps are only mirrored briefly after real host pointer
+     * input. This keeps relative-mouse clients such as games working when a
+     * user is physically interacting with Xephyr, while preventing nested/XTest
+     * operations from moving the host pointer by issuing WarpPointer requests.
+     */
+    CARD32 host_pointer_warp_deadline;
+
+    Bool host_pointer_position_valid;
+    int host_pointer_x;
+    int host_pointer_y;
+    EphyrHostPointerWarp host_pointer_warps[EPHYR_HOST_POINTER_WARP_SLOTS];
+    unsigned int next_host_pointer_warp;
+
     const char *output;         /* Set via -output option */
     unsigned char *fb_data;     /* only used when host bpp != server bpp */
     xcb_shm_segment_info_t shminfo;

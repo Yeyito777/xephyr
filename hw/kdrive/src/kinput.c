@@ -1514,11 +1514,12 @@ KdClassifyInput(KdPointerInfo * pi, int type, int x, int y, int z, int b)
 
 static void
 _KdEnqueuePointerEvent(KdPointerInfo * pi, int type, int x, int y, int z,
-                       int b, int absrel, Bool force);
+                       int b, int absrel, Bool force,
+                       const double *unaccelerated);
 /* We return true if we're stealing the event. */
 static Bool
 KdRunMouseMachine(KdPointerInfo * pi, KdInputClass c, int type, int x, int y,
-                  int z, int b, int absrel)
+                  int z, int b, int absrel, const double *unaccelerated)
 {
     const KdInputTransition *t;
     int a;
@@ -1539,6 +1540,11 @@ KdRunMouseMachine(KdPointerInfo * pi, KdInputClass c, int type, int x, int y,
             pi->heldEvent.z = z;
             pi->heldEvent.flags = b;
             pi->heldEvent.absrel = absrel;
+            pi->heldEvent.has_unaccelerated = unaccelerated != NULL;
+            if (unaccelerated) {
+                memcpy(pi->heldEvent.unaccelerated, unaccelerated,
+                       sizeof(pi->heldEvent.unaccelerated));
+            }
             return TRUE;
             break;
         case setto:
@@ -1549,7 +1555,9 @@ KdRunMouseMachine(KdPointerInfo * pi, KdInputClass c, int type, int x, int y,
             _KdEnqueuePointerEvent(pi, pi->heldEvent.type, pi->heldEvent.x,
                                    pi->heldEvent.y, pi->heldEvent.z,
                                    pi->heldEvent.flags, pi->heldEvent.absrel,
-                                   TRUE);
+                                   TRUE,
+                                   pi->heldEvent.has_unaccelerated ?
+                                   pi->heldEvent.unaccelerated : NULL);
             break;
         case release:
             pi->eventHeld = FALSE;
@@ -1557,19 +1565,23 @@ KdRunMouseMachine(KdPointerInfo * pi, KdInputClass c, int type, int x, int y,
             _KdEnqueuePointerEvent(pi, pi->heldEvent.type, pi->heldEvent.x,
                                    pi->heldEvent.y, pi->heldEvent.z,
                                    pi->heldEvent.flags, pi->heldEvent.absrel,
-                                   TRUE);
+                                   TRUE,
+                                   pi->heldEvent.has_unaccelerated ?
+                                   pi->heldEvent.unaccelerated : NULL);
             return TRUE;
             break;
         case clearto:
             pi->timeoutPending = FALSE;
             break;
         case gen_down_2:
-            _KdEnqueuePointerEvent(pi, ButtonPress, x, y, z, 2, absrel, TRUE);
+            _KdEnqueuePointerEvent(pi, ButtonPress, x, y, z, 2, absrel,
+                                   TRUE, NULL);
             pi->eventHeld = FALSE;
             return TRUE;
             break;
         case gen_up_2:
-            _KdEnqueuePointerEvent(pi, ButtonRelease, x, y, z, 2, absrel, TRUE);
+            _KdEnqueuePointerEvent(pi, ButtonRelease, x, y, z, 2, absrel,
+                                   TRUE, NULL);
             return TRUE;
             break;
         }
@@ -1580,26 +1592,45 @@ KdRunMouseMachine(KdPointerInfo * pi, KdInputClass c, int type, int x, int y,
 
 static int
 KdHandlePointerEvent(KdPointerInfo * pi, int type, int x, int y, int z, int b,
-                     int absrel)
+                     int absrel, const double *unaccelerated)
 {
     if (pi->emulateMiddleButton)
         return KdRunMouseMachine(pi, KdClassifyInput(pi, type, x, y, z, b),
-                                 type, x, y, z, b, absrel);
+                                 type, x, y, z, b, absrel, unaccelerated);
     return FALSE;
 }
 
 static void
 _KdEnqueuePointerEvent(KdPointerInfo * pi, int type, int x, int y, int z,
-                       int b, int absrel, Bool force)
+                       int b, int absrel, Bool force,
+                       const double *unaccelerated)
 {
     int valuators[3] = { x, y, z };
     ValuatorMask mask;
+    int i;
 
     /* TRUE from KdHandlePointerEvent, means 'we swallowed the event'. */
-    if (!force && KdHandlePointerEvent(pi, type, x, y, z, b, absrel))
+    if (!force && KdHandlePointerEvent(pi, type, x, y, z, b, absrel,
+                                       unaccelerated))
         return;
 
-    valuator_mask_set_range(&mask, 0, 3, valuators);
+    if (unaccelerated) {
+        valuator_mask_zero(&mask);
+        for (i = 0; i < ARRAY_SIZE(valuators); i++) {
+            if (absrel & POINTER_ABSOLUTE) {
+                valuator_mask_set_absolute_unaccelerated(&mask, i,
+                                                         valuators[i],
+                                                         unaccelerated[i]);
+            }
+            else {
+                valuator_mask_set_unaccelerated(&mask, i, valuators[i],
+                                                unaccelerated[i]);
+            }
+        }
+    }
+    else {
+        valuator_mask_set_range(&mask, 0, 3, valuators);
+    }
 
     QueuePointerEvents(pi->dixdev, type, b, absrel, &mask);
 }
@@ -1607,7 +1638,7 @@ _KdEnqueuePointerEvent(KdPointerInfo * pi, int type, int x, int y, int z,
 static void
 KdReceiveTimeout(KdPointerInfo * pi)
 {
-    KdRunMouseMachine(pi, timeout, 0, 0, 0, 0, 0, 0);
+    KdRunMouseMachine(pi, timeout, 0, 0, 0, 0, 0, 0, NULL);
 }
 
 extern int nClients;
@@ -1712,7 +1743,7 @@ KdEnqueuePointerEvent(KdPointerInfo * pi, unsigned long flags, int rx, int ry,
         if (x || y || z) {
             dixflags = POINTER_RELATIVE | POINTER_ACCELERATE;
             _KdEnqueuePointerEvent(pi, MotionNotify, x, y, z, 0, dixflags,
-                                   FALSE);
+                                   FALSE, NULL);
         }
     }
     else {
@@ -1722,7 +1753,7 @@ KdEnqueuePointerEvent(KdPointerInfo * pi, unsigned long flags, int rx, int ry,
         if (x != pi->dixdev->last.valuators[0] ||
             y != pi->dixdev->last.valuators[1])
             _KdEnqueuePointerEvent(pi, MotionNotify, x, y, z, 0, dixflags,
-                                   FALSE);
+                                   FALSE, NULL);
     }
 
     buttons = flags;
@@ -1731,18 +1762,84 @@ KdEnqueuePointerEvent(KdPointerInfo * pi, unsigned long flags, int rx, int ry,
         if (((pi->buttonState & button) ^ (buttons & button)) &&
             !(buttons & button)) {
             _KdEnqueuePointerEvent(pi, ButtonRelease, x, y, z, n,
-                                   dixflags, FALSE);
+                                   dixflags, FALSE, NULL);
         }
     }
     for (button = KD_BUTTON_1, n = 1; n <= pi->nButtons; button <<= 1, n++) {
         if (((pi->buttonState & button) ^ (buttons & button)) &&
             (buttons & button)) {
             _KdEnqueuePointerEvent(pi, ButtonPress, x, y, z, n,
-                                   dixflags, FALSE);
+                                   dixflags, FALSE, NULL);
         }
     }
 
     pi->buttonState = buttons;
+}
+
+/*
+ * Post pointer motion whose normal coordinates and raw motion have different
+ * semantics.  Nested servers receive an absolute pointer position from their
+ * host server, but XI2 RawMotion consumers still need the corresponding
+ * relative delta.  ValuatorMask can carry both forms in one event.
+ */
+void
+KdEnqueuePointerMotionWithRawDeltas(KdPointerInfo * pi, unsigned long flags,
+                                    int rx, int ry, int rz,
+                                    int raw_rx, int raw_ry, int raw_rz)
+{
+    int (*matrix)[3] = kdPointerMatrix.matrix;
+    int x, y, raw_x, raw_y;
+    double unaccelerated[3];
+    int dixflags;
+
+    if (!pi)
+        return;
+
+    if (flags & KD_MOUSE_DELTA) {
+        if (pi->transformCoordinates) {
+            x = matrix[0][0] * rx + matrix[0][1] * ry;
+            y = matrix[1][0] * rx + matrix[1][1] * ry;
+        }
+        else {
+            x = rx;
+            y = ry;
+        }
+        dixflags = POINTER_RELATIVE | POINTER_ACCELERATE;
+    }
+    else {
+        if (pi->transformCoordinates) {
+            x = matrix[0][0] * rx + matrix[0][1] * ry + matrix[0][2];
+            y = matrix[1][0] * rx + matrix[1][1] * ry + matrix[1][2];
+        }
+        else {
+            x = rx;
+            y = ry;
+        }
+        dixflags = POINTER_ABSOLUTE;
+        if (flags & KD_POINTER_DESKTOP)
+            dixflags |= POINTER_DESKTOP;
+    }
+
+    if (pi->transformCoordinates) {
+        raw_x = matrix[0][0] * raw_rx + matrix[0][1] * raw_ry;
+        raw_y = matrix[1][0] * raw_rx + matrix[1][1] * raw_ry;
+    }
+    else {
+        raw_x = raw_rx;
+        raw_y = raw_ry;
+    }
+
+    unaccelerated[0] = raw_x;
+    unaccelerated[1] = raw_y;
+    unaccelerated[2] = raw_rz;
+
+    if ((flags & KD_MOUSE_DELTA) ? (x || y || rz) :
+        (x != pi->dixdev->last.valuators[0] ||
+         y != pi->dixdev->last.valuators[1] ||
+         raw_x || raw_y || raw_rz)) {
+        _KdEnqueuePointerEvent(pi, MotionNotify, x, y, rz, 0, dixflags,
+                               FALSE, unaccelerated);
+    }
 }
 
 void

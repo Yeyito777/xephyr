@@ -120,7 +120,8 @@ ddxUseMsg(void)
 
     ErrorF("\nXephyr Option Usage:\n");
     ErrorF("-parent <XID>        Use existing window as Xephyr root win\n");
-    ErrorF("-sw-cursor           Render cursors in software in Xephyr\n");
+    ErrorF("-sw-cursor           Render cursors in software in Xephyr (default)\n");
+    ErrorF("-host-cursor         Reuse the host cursor for debugging\n");
     ErrorF("-fullscreen          Attempt to run Xephyr fullscreen\n");
     ErrorF("-output <NAME>       Attempt to run Xephyr fullscreen (restricted to given output geometry)\n");
     ErrorF("-grayscale           Simulate 8bit grayscale\n");
@@ -235,7 +236,7 @@ ddxProcessArgument(int argc, char **argv, int i)
         return 1;
     }
     else if (!strcmp(argv[i], "-host-cursor")) {
-        /* Compatibility with the old command line argument, now the default. */
+        hostx_use_host_cursor();
         return 1;
     }
     else if (!strcmp(argv[i], "-fullscreen")) {
@@ -356,8 +357,7 @@ OsVendorInit(void)
     if (SeatId)
         hostx_use_sw_cursor();
 
-    if (hostx_want_host_cursor())
-        ephyrFuncs.initCursor = &ephyrCursorInit;
+    ephyrFuncs.initCursor = &ephyrCursorInit;
 
     if (serverGeneration == 1) {
         if (!KdCardInfoLast()) {

@@ -85,9 +85,9 @@ struct EphyrHostXVars {
     Bool size_set_from_configure;
 };
 
-/* memset ( missing> ) instead of below  */
-/*static EphyrHostXVars HostX = { "?", 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};*/
-static EphyrHostXVars HostX;
+static EphyrHostXVars HostX = {
+    .use_sw_cursor = TRUE,
+};
 
 static int HostXWantDamageDebug = 0;
 
@@ -200,17 +200,28 @@ hostx_set_win_title(KdScreenInfo *screen, const char *extra_text)
     }
 }
 
+static Bool
+hostx_pointer_warp_allowed(EphyrScrPriv *scrpriv)
+{
+    CARD32 now = GetTimeInMillis();
+
+    return scrpriv->host_pointer_warp_deadline &&
+           (int)(now - scrpriv->host_pointer_warp_deadline) <= 0;
+}
+
 void
 hostx_warp_pointer(ScreenPtr pScreen, int x, int y)
 {
     KdScreenPriv(pScreen);
     KdScreenInfo *kd_screen = pScreenPriv->screen;
     EphyrScrPriv *scrpriv = kd_screen->driver;
+    EphyrHostPointerWarp *warp;
+    xcb_void_cookie_t cookie;
 
-    if (!scrpriv)
+    if (!scrpriv || !hostx_pointer_warp_allowed(scrpriv))
         return;
 
-    if (!scrpriv->host_window_focused || !scrpriv->host_pointer_inside)
+    if (scrpriv->win_width <= 0 || scrpriv->win_height <= 0)
         return;
 
     if (x < 0)
@@ -222,8 +233,19 @@ hostx_warp_pointer(ScreenPtr pScreen, int x, int y)
     if (y >= scrpriv->win_height)
         y = scrpriv->win_height - 1;
 
-    xcb_warp_pointer(HostX.conn, XCB_NONE, scrpriv->win,
-                     0, 0, 0, 0, x, y);
+    cookie = xcb_warp_pointer(HostX.conn, XCB_NONE, scrpriv->win,
+                              0, 0, 0, 0, x, y);
+
+    warp = &scrpriv->host_pointer_warps[scrpriv->next_host_pointer_warp];
+    warp->active = TRUE;
+    warp->sequence = cookie.sequence;
+    warp->x = x;
+    warp->y = y;
+    warp->deadline = GetTimeInMillis() + 1000;
+    scrpriv->next_host_pointer_warp =
+        (scrpriv->next_host_pointer_warp + 1) %
+        EPHYR_HOST_POINTER_WARP_SLOTS;
+
     xcb_flush(HostX.conn);
 }
 
@@ -237,6 +259,12 @@ void
 hostx_use_sw_cursor(void)
 {
     HostX.use_sw_cursor = TRUE;
+}
+
+void
+hostx_use_host_cursor(void)
+{
+    HostX.use_sw_cursor = FALSE;
 }
 
 xcb_cursor_t
@@ -563,9 +591,6 @@ hostx_init(void)
         | XCB_EVENT_MASK_POINTER_MOTION
         | XCB_EVENT_MASK_KEY_PRESS
         | XCB_EVENT_MASK_KEY_RELEASE
-        | XCB_EVENT_MASK_ENTER_WINDOW
-        | XCB_EVENT_MASK_LEAVE_WINDOW
-        | XCB_EVENT_MASK_FOCUS_CHANGE
         | XCB_EVENT_MASK_EXPOSURE
         | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
     attr_mask |= XCB_CW_EVENT_MASK;

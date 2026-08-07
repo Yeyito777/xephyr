@@ -54,11 +54,18 @@ argument follows a
 .BI -parent
 argument, this screen is embedded into the given window.
 .TP 8
+.B -sw-cursor
+Render the cursor in software inside Xephyr. This is the default, and keeps
+ordinary Xephyr cursor warps contained to the nested server instead of moving
+the host pointer. Warps are mirrored to the host only briefly after real host
+pointer input, which preserves relative-mouse behavior for games.
+.TP 8
 .B -host-cursor
 set 'cursor acceleration':
 The host's cursor is reused. This is only really there to aid
 debugging by avoiding server paints for the cursor. Performance
-improvement is negligible.
+improvement is negligible. Cursor warps use the same controlled mirroring as
+the default software cursor mode.
 .TP 8
 .B -resizeable
 Allow the Xephyr window to be resized, even if not embedded into a parent

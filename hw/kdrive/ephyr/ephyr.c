@@ -50,6 +50,8 @@ Bool ephyrNoXV = FALSE;
 static int mouseState = 0;
 static Rotation ephyrRandr = RR_Rotate_0;
 
+#define EPHYR_HOST_POINTER_WARP_GRACE_MS 500
+
 typedef struct _EphyrInputPrivate {
     Bool enabled;
 } EphyrKbdPrivate, EphyrPointerPrivate;
@@ -855,6 +857,66 @@ screen_from_window(Window w)
 }
 
 static void
+ephyrArmHostPointerWarp(KdScreenInfo *screen, xcb_generic_event_t *xev)
+{
+    EphyrScrPriv *scrpriv;
+
+    if (!screen || (xev->response_type & 0x80))
+        return;
+
+    scrpriv = screen->driver;
+    if (scrpriv)
+        scrpriv->host_pointer_warp_deadline =
+            GetTimeInMillis() + EPHYR_HOST_POINTER_WARP_GRACE_MS;
+}
+
+static Bool
+ephyrConsumeHostPointerWarp(KdScreenInfo *screen,
+                            xcb_motion_notify_event_t *motion)
+{
+    EphyrScrPriv *scrpriv;
+    CARD32 now = GetTimeInMillis();
+    int i;
+
+    if (!screen)
+        return FALSE;
+
+    scrpriv = screen->driver;
+    if (!scrpriv)
+        return FALSE;
+
+    for (i = 0; i < EPHYR_HOST_POINTER_WARP_SLOTS; i++) {
+        EphyrHostPointerWarp *warp = &scrpriv->host_pointer_warps[i];
+
+        if (!warp->active)
+            continue;
+
+        if ((int)(now - warp->deadline) > 0) {
+            warp->active = FALSE;
+            continue;
+        }
+
+        /*
+         * WarpPointer-generated MotionNotify events are normal server events,
+         * not SendEvent events.  Match the request sequence and destination
+         * instead of relying on the synthetic-event bit.
+         */
+        if (motion->sequence != warp->sequence ||
+            motion->event_x != warp->x || motion->event_y != warp->y) {
+            continue;
+        }
+
+        warp->active = FALSE;
+        scrpriv->host_pointer_x = motion->event_x;
+        scrpriv->host_pointer_y = motion->event_y;
+        scrpriv->host_pointer_position_valid = TRUE;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void
 ephyrProcessErrorEvent(xcb_generic_event_t *xev)
 {
     xcb_generic_error_t *e = (xcb_generic_error_t *)xev;
@@ -897,6 +959,19 @@ ephyrProcessMouseMotion(xcb_generic_event_t *xev)
 {
     xcb_motion_notify_event_t *motion = (xcb_motion_notify_event_t *)xev;
     KdScreenInfo *screen = screen_from_window(motion->event);
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return;
+
+    scrpriv = screen->driver;
+    if (!scrpriv)
+        return;
+
+    if (ephyrConsumeHostPointerWarp(screen, motion))
+        return;
+
+    ephyrArmHostPointerWarp(screen, xev);
 
     if (!ephyrMouse ||
         !((EphyrPointerPrivate *) ephyrMouse->driverPrivate)->enabled) {
@@ -910,14 +985,25 @@ ephyrProcessMouseMotion(xcb_generic_event_t *xev)
                   ephyrCursorScreen->myNum, screen->pScreen->myNum);
         ephyrWarpCursor(inputInfo.pointer, screen->pScreen,
                         motion->event_x, motion->event_y);
+        scrpriv->host_pointer_x = motion->event_x;
+        scrpriv->host_pointer_y = motion->event_y;
+        scrpriv->host_pointer_position_valid = TRUE;
     }
     else {
-        int x = 0, y = 0;
+        int x = 0, y = 0, dx = 0, dy = 0;
 
         EPHYR_LOG("enqueuing mouse motion:%d\n", screen->pScreen->myNum);
         x = motion->event_x;
         y = motion->event_y;
         EPHYR_LOG("initial (x,y):(%d,%d)\n", x, y);
+
+        if (scrpriv->host_pointer_position_valid) {
+            dx = x - scrpriv->host_pointer_x;
+            dy = y - scrpriv->host_pointer_y;
+        }
+        scrpriv->host_pointer_x = x;
+        scrpriv->host_pointer_y = y;
+        scrpriv->host_pointer_position_valid = TRUE;
 
         /* convert coords into desktop-wide coordinates.
          * fill_pointer_events will convert that back to
@@ -925,7 +1011,9 @@ ephyrProcessMouseMotion(xcb_generic_event_t *xev)
         x += screen->pScreen->x;
         y += screen->pScreen->y;
 
-        KdEnqueuePointerEvent(ephyrMouse, mouseState | KD_POINTER_DESKTOP, x, y, 0);
+        KdEnqueuePointerMotionWithRawDeltas(
+            ephyrMouse, mouseState | KD_POINTER_DESKTOP, x, y, 0,
+            dx, dy, 0);
     }
 }
 
@@ -933,10 +1021,16 @@ static void
 ephyrProcessButtonPress(xcb_generic_event_t *xev)
 {
     xcb_button_press_event_t *button = (xcb_button_press_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(button->event);
+
+    if (!screen)
+        return;
+
+    ephyrArmHostPointerWarp(screen, xev);
 
     if (!ephyrMouse ||
         !((EphyrPointerPrivate *) ephyrMouse->driverPrivate)->enabled) {
-        EPHYR_LOG("skipping mouse press:%d\n", screen_from_window(button->event)->pScreen->myNum);
+        EPHYR_LOG("skipping mouse press:%d\n", screen->pScreen->myNum);
         return;
     }
 
@@ -946,7 +1040,7 @@ ephyrProcessButtonPress(xcb_generic_event_t *xev)
      */
     mouseState |= 1 << (button->detail - 1);
 
-    EPHYR_LOG("enqueuing mouse press:%d\n", screen_from_window(button->event)->pScreen->myNum);
+    EPHYR_LOG("enqueuing mouse press:%d\n", screen->pScreen->myNum);
     KdEnqueuePointerEvent(ephyrMouse, mouseState | KD_MOUSE_DELTA, 0, 0, 0);
 }
 
@@ -954,6 +1048,12 @@ static void
 ephyrProcessButtonRelease(xcb_generic_event_t *xev)
 {
     xcb_button_press_event_t *button = (xcb_button_press_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(button->event);
+
+    if (!screen)
+        return;
+
+    ephyrArmHostPointerWarp(screen, xev);
 
     if (!ephyrMouse ||
         !((EphyrPointerPrivate *) ephyrMouse->driverPrivate)->enabled) {
@@ -963,7 +1063,7 @@ ephyrProcessButtonRelease(xcb_generic_event_t *xev)
     ephyrUpdateModifierState(button->state);
     mouseState &= ~(1 << (button->detail - 1));
 
-    EPHYR_LOG("enqueuing mouse release:%d\n", screen_from_window(button->event)->pScreen->myNum);
+    EPHYR_LOG("enqueuing mouse release:%d\n", screen->pScreen->myNum);
     KdEnqueuePointerEvent(ephyrMouse, mouseState | KD_MOUSE_DELTA, 0, 0, 0);
 }
 
@@ -1011,66 +1111,6 @@ ephyrProcessConfigureNotify(xcb_generic_event_t *xev)
 #ifdef RANDR
     ephyrResizeScreen(screen->pScreen, configure->width, configure->height);
 #endif /* RANDR */
-}
-
-static void
-ephyrProcessFocusIn(xcb_generic_event_t *xev)
-{
-    xcb_focus_in_event_t *focus = (xcb_focus_in_event_t *)xev;
-    KdScreenInfo *screen = screen_from_window(focus->event);
-    EphyrScrPriv *scrpriv;
-
-    if (!screen)
-        return;
-
-    scrpriv = screen->driver;
-    if (scrpriv)
-        scrpriv->host_window_focused = TRUE;
-}
-
-static void
-ephyrProcessFocusOut(xcb_generic_event_t *xev)
-{
-    xcb_focus_out_event_t *focus = (xcb_focus_out_event_t *)xev;
-    KdScreenInfo *screen = screen_from_window(focus->event);
-    EphyrScrPriv *scrpriv;
-
-    if (!screen)
-        return;
-
-    scrpriv = screen->driver;
-    if (scrpriv)
-        scrpriv->host_window_focused = FALSE;
-}
-
-static void
-ephyrProcessEnterNotify(xcb_generic_event_t *xev)
-{
-    xcb_enter_notify_event_t *enter = (xcb_enter_notify_event_t *)xev;
-    KdScreenInfo *screen = screen_from_window(enter->event);
-    EphyrScrPriv *scrpriv;
-
-    if (!screen)
-        return;
-
-    scrpriv = screen->driver;
-    if (scrpriv)
-        scrpriv->host_pointer_inside = TRUE;
-}
-
-static void
-ephyrProcessLeaveNotify(xcb_generic_event_t *xev)
-{
-    xcb_leave_notify_event_t *leave = (xcb_leave_notify_event_t *)xev;
-    KdScreenInfo *screen = screen_from_window(leave->event);
-    EphyrScrPriv *scrpriv;
-
-    if (!screen)
-        return;
-
-    scrpriv = screen->driver;
-    if (scrpriv)
-        scrpriv->host_pointer_inside = FALSE;
 }
 
 static void
@@ -1130,22 +1170,6 @@ ephyrXcbProcessEvents(Bool queued_only)
             free(configure);
             configure = xev;
             xev = NULL;
-            break;
-
-        case XCB_FOCUS_IN:
-            ephyrProcessFocusIn(xev);
-            break;
-
-        case XCB_FOCUS_OUT:
-            ephyrProcessFocusOut(xev);
-            break;
-
-        case XCB_ENTER_NOTIFY:
-            ephyrProcessEnterNotify(xev);
-            break;
-
-        case XCB_LEAVE_NOTIFY:
-            ephyrProcessLeaveNotify(xev);
             break;
         }
 

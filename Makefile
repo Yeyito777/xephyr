@@ -6,7 +6,9 @@ NINJA ?= ninja
 MESON_ARGS ?= -Dxephyr=true -Dxorg=false -Dxnest=false -Dxvfb=false -Dxwin=false -Dxquartz=false -Ddocs=false -Ddevel-docs=false -Ddocs-pdf=false
 XEPHYR_BIN := $(BUILD_DIR)/hw/kdrive/ephyr/Xephyr
 
-.PHONY: setup reconfigure build install reinstall uninstall clean distclean info
+.DEFAULT_GOAL := build
+
+.PHONY: setup reconfigure build install reinstall uninstall clean distclean info test-relative-pointer
 
 setup:
 	$(MESON) setup $(BUILD_DIR) $(MESON_ARGS)
@@ -43,3 +45,6 @@ info: build
 	@echo "Built binary: $(abspath $(XEPHYR_BIN))"
 	@echo "Install path: $(BIN_DIR)/Xephyr"
 	@strings $(XEPHYR_BIN) | grep -F 'ctrl+shift+space' || true
+
+test-relative-pointer: build
+	XEPHYR_BIN="$(abspath $(XEPHYR_BIN))" ./test/ephyr/test-relative-pointer.sh

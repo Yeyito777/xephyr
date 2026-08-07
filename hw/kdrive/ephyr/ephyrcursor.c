@@ -246,6 +246,9 @@ miPointerSpriteFuncRec EphyrPointerSpriteFuncs = {
 Bool
 ephyrCursorInit(ScreenPtr screen)
 {
+    if (!hostx_want_host_cursor())
+        return miDCInitialize(screen, &ephyrPointerScreenFuncs);
+
     if (!dixRegisterPrivateKey(&ephyrCursorPrivateKey, PRIVATE_CURSOR,
                                sizeof(ephyrCursorRec)))
         return FALSE;

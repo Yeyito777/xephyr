@@ -78,6 +78,9 @@ int
 void
  hostx_use_sw_cursor(void);
 
+void
+ hostx_use_host_cursor(void);
+
 xcb_cursor_t
  hostx_get_empty_cursor(void);
 
