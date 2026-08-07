@@ -13,9 +13,12 @@ main(int argc, char **argv)
     unsigned char mask[XIMaskLen(XI_RawMotion)] = { 0 };
     int xi_opcode, event_base, error_base;
     int major = 2, minor = 0;
+    int grab_pointer = 0;
 
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s DISPLAY\n", argv[0]);
+    if (argc == 3 && strcmp(argv[2], "--grab") == 0)
+        grab_pointer = 1;
+    else if (argc != 2) {
+        fprintf(stderr, "usage: %s DISPLAY [--grab]\n", argv[0]);
         return 2;
     }
 
@@ -37,10 +40,20 @@ main(int argc, char **argv)
     event_mask.mask = mask;
     XISetMask(mask, XI_RawMotion);
     XISelectEvents(display, DefaultRootWindow(display), &event_mask, 1);
+
+    if (grab_pointer &&
+        XGrabPointer(display, DefaultRootWindow(display), True,
+                     PointerMotionMask | ButtonPressMask | ButtonReleaseMask,
+                     GrabModeAsync, GrabModeAsync,
+                     DefaultRootWindow(display), None,
+                     CurrentTime) != GrabSuccess) {
+        fprintf(stderr, "guest XGrabPointer failed\n");
+        return 1;
+    }
     XSync(display, False);
 
     setvbuf(stdout, NULL, _IOLBF, 0);
-    printf("READY xi=%d.%d\n", major, minor);
+    printf("READY xi=%d.%d grabbed=%d\n", major, minor, grab_pointer);
 
     for (;;) {
         XEvent event;

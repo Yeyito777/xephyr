@@ -1785,10 +1785,12 @@ KdEnqueuePointerEvent(KdPointerInfo * pi, unsigned long flags, int rx, int ry,
 void
 KdEnqueuePointerMotionWithRawDeltas(KdPointerInfo * pi, unsigned long flags,
                                     int rx, int ry, int rz,
-                                    int raw_rx, int raw_ry, int raw_rz)
+                                    double raw_rx, double raw_ry,
+                                    double raw_rz)
 {
     int (*matrix)[3] = kdPointerMatrix.matrix;
-    int x, y, raw_x, raw_y;
+    int x, y;
+    double raw_x, raw_y;
     double unaccelerated[3];
     int dixflags;
 

@@ -70,6 +70,12 @@ the default software cursor mode.
 .B -resizeable
 Allow the Xephyr window to be resized, even if not embedded into a parent
 window. By default, the Xephyr window has a fixed size.
+.SH "POINTER CAPTURE"
+Explicit pointer grabs made by nested clients are mirrored to the focused
+Xephyr host window. While captured, host XI2 raw motion is forwarded to the
+nested pointer so relative-motion applications are not limited by host window
+or monitor edges. Passive and implicit button grabs are not mirrored. Host
+capture is released on focus loss or when the nested client ungrabs.
 .SH "SIGNALS"
 Send a SIGUSR1 to the server (e.g. pkill -USR1 Xephyr) to
 toggle the debugging mode.
@@ -78,6 +84,9 @@ screen areas getting painted before painting the actual content.
 The
 delay between this can be altered by setting a XEPHYR_PAUSE env var to
 a value in micro seconds.
+.PP
+Send SIGUSR2 to emergency-release host pointer capture. Automatic recapture
+remains inhibited until the nested client ends its current explicit grab.
 .SH CAVEATS
 .PP
 .IP \(bu 2

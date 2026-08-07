@@ -402,7 +402,8 @@ KdEnqueuePointerEvent(KdPointerInfo * pi, unsigned long flags, int rx, int ry,
 void
 KdEnqueuePointerMotionWithRawDeltas(KdPointerInfo * pi, unsigned long flags,
                                     int rx, int ry, int rz,
-                                    int raw_rx, int raw_ry, int raw_rz);
+                                    double raw_rx, double raw_ry,
+                                    double raw_rz);
 
 void
  KdSetPointerMatrix(KdPointerMatrix *pointer);

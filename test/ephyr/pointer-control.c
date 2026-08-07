@@ -1,4 +1,5 @@
 #include <X11/Xlib.h>
+#include <X11/extensions/XTest.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,8 +61,13 @@ main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s DISPLAY window-move TITLE X Y\n"
                 "       %s DISPLAY window-query TITLE\n"
+                "       %s DISPLAY window-focus TITLE\n"
+                "       %s DISPLAY window-grab-status TITLE\n"
                 "       %s DISPLAY root-warp X Y\n"
-                "       %s DISPLAY root-query\n",
+                "       %s DISPLAY root-relative DX DY\n"
+                "       %s DISPLAY root-query\n"
+                "       %s DISPLAY root-focus\n",
+                argv[0], argv[0], argv[0], argv[0],
                 argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
@@ -88,9 +94,25 @@ main(int argc, char **argv)
             return 2;
         return print_pointer_position(display, root);
     }
+    else if (strcmp(command, "root-focus") == 0) {
+        if (argc != 3)
+            return 2;
+        XSetInputFocus(display, root, RevertToPointerRoot, CurrentTime);
+        XSync(display, False);
+        return 0;
+    }
+    else if (strcmp(command, "root-relative") == 0) {
+        if (argc != 5)
+            return 2;
+        XTestFakeRelativeMotionEvent(display, atoi(argv[3]), atoi(argv[4]), 0);
+        XSync(display, False);
+        return 0;
+    }
 
     if ((strcmp(command, "window-move") == 0 && argc != 6) ||
-        (strcmp(command, "window-query") == 0 && argc != 4)) {
+        ((strcmp(command, "window-query") == 0 ||
+          strcmp(command, "window-focus") == 0 ||
+          strcmp(command, "window-grab-status") == 0) && argc != 4)) {
         return 2;
     }
 
@@ -106,7 +128,29 @@ main(int argc, char **argv)
         XSync(display, False);
         return 0;
     }
-    else {
+    else if (strcmp(command, "window-query") == 0) {
         return print_pointer_position(display, window);
     }
+    else if (strcmp(command, "window-focus") == 0) {
+        XSetInputFocus(display, window, RevertToPointerRoot, CurrentTime);
+        XSync(display, False);
+        return 0;
+    }
+    else if (strcmp(command, "window-grab-status") == 0) {
+        int status = XGrabPointer(display, window, True, PointerMotionMask,
+                                  GrabModeAsync, GrabModeAsync, window, None,
+                                  CurrentTime);
+
+        if (status == GrabSuccess) {
+            XUngrabPointer(display, CurrentTime);
+            XSync(display, False);
+            puts("free");
+        }
+        else {
+            puts("grabbed");
+        }
+        return 0;
+    }
+
+    return 2;
 }

@@ -16,6 +16,7 @@ xephyr_dep = [
     dependency('xcb-aux'),
     dependency('xcb-image'),
     dependency('xcb-icccm'),
+    dependency('xcb-xinput'),
     dependency('xcb-shm', version : '>=1.9.3'),
     dependency('xcb-keysyms'),
     dependency('xcb-randr'),

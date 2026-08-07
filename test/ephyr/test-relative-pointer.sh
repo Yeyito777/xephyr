@@ -8,8 +8,10 @@ TEST_BUILD_DIR="$ROOT_DIR/build/test/ephyr-relative-pointer"
 TITLE="xephyr-relative-pointer-test-$$"
 EVENTS="$TEST_BUILD_DIR/events-$$.log"
 XEPHYR_LOG="$TEST_BUILD_DIR/xephyr-$$.log"
+GRAB_LOG="$TEST_BUILD_DIR/grab-$$.log"
 xephyr_pid=""
 recorder_pid=""
+grab_pid=""
 
 fail() {
     echo "relative-pointer test: $*" >&2
@@ -21,15 +23,21 @@ fail() {
         echo "--- Xephyr log ---" >&2
         cat "$XEPHYR_LOG" >&2
     fi
+    if [[ -f "$GRAB_LOG" ]]; then
+        echo "--- guest grab client ---" >&2
+        cat "$GRAB_LOG" >&2
+    fi
     exit 1
 }
 
 cleanup() {
+    [[ -z "$grab_pid" ]] || kill "$grab_pid" 2>/dev/null || true
     [[ -z "$recorder_pid" ]] || kill "$recorder_pid" 2>/dev/null || true
     [[ -z "$xephyr_pid" ]] || kill "$xephyr_pid" 2>/dev/null || true
+    [[ -z "$grab_pid" ]] || wait "$grab_pid" 2>/dev/null || true
     [[ -z "$recorder_pid" ]] || wait "$recorder_pid" 2>/dev/null || true
     [[ -z "$xephyr_pid" ]] || wait "$xephyr_pid" 2>/dev/null || true
-    rm -f "$EVENTS" "$XEPHYR_LOG"
+    rm -f "$EVENTS" "$XEPHYR_LOG" "$GRAB_LOG"
 }
 trap cleanup EXIT
 
@@ -44,7 +52,7 @@ cc -O2 -Wall -Wextra -o "$TEST_BUILD_DIR/xi2-raw-recorder" \
     $(pkg-config --cflags --libs xi x11)
 cc -O2 -Wall -Wextra -o "$TEST_BUILD_DIR/pointer-control" \
     "$ROOT_DIR/test/ephyr/pointer-control.c" \
-    $(pkg-config --cflags --libs x11)
+    $(pkg-config --cflags --libs x11 xtst)
 
 display=""
 for number in $(seq 90 199); do
@@ -125,4 +133,100 @@ host_position=$("$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" \
 [[ "$host_position" == "400 300" ]] ||
     fail "guest warp was not mirrored to host (got $host_position)"
 
-echo "relative-pointer test: PASS (+10,-5 raw delta; mirrored warp suppressed)"
+# An explicit guest grab must be mirrored to the host.  Host XI2 raw motion
+# must keep flowing after the visible host pointer has been driven to an edge.
+"$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" \
+    window-focus "$TITLE"
+"$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" \
+    window-move "$TITLE" 400 300
+kill "$recorder_pid"
+wait "$recorder_pid" 2>/dev/null || true
+recorder_pid=""
+"$TEST_BUILD_DIR/xi2-raw-recorder" "$display" --grab >"$GRAB_LOG" 2>&1 &
+grab_pid=$!
+for _ in $(seq 1 100); do
+    grep -q '^READY .* grabbed=1' "$GRAB_LOG" 2>/dev/null && break
+    kill -0 "$grab_pid" 2>/dev/null || fail "guest grab client exited during startup"
+    sleep 0.02
+done
+grep -q '^READY .* grabbed=1' "$GRAB_LOG" || fail "guest grab client did not become ready"
+
+host_grabbed=0
+for _ in $(seq 1 100); do
+    if [[ "$("$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" \
+        window-grab-status "$TITLE")" == "grabbed" ]]; then
+        host_grabbed=1
+        break
+    fi
+    sleep 0.02
+done
+[[ "$host_grabbed" == "1" ]] || fail "guest grab was not mirrored to host"
+
+"$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" root-relative 10000 0
+sleep 0.08
+edge_lines=$(wc -l < "$GRAB_LOG")
+"$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" root-relative 17 -9
+
+edge_motion=0
+for _ in $(seq 1 100); do
+    if tail -n "+$((edge_lines + 1))" "$GRAB_LOG" |
+        grep -q '^RAW dx=17\.000 dy=-9\.000 '; then
+        edge_motion=1
+        break
+    fi
+    sleep 0.02
+done
+[[ "$edge_motion" == "1" ]] ||
+    fail "raw motion stopped after the host pointer reached its edge"
+
+# Losing host focus must always release capture.  Refocusing the still-grabbed
+# guest should safely acquire it again.
+"$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" root-focus
+focus_released=0
+for _ in $(seq 1 100); do
+    if [[ "$("$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" \
+        window-grab-status "$TITLE")" == "free" ]]; then
+        focus_released=1
+        break
+    fi
+    sleep 0.02
+done
+[[ "$focus_released" == "1" ]] || fail "host FocusOut did not release capture"
+
+"$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" window-focus "$TITLE"
+"$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" window-move "$TITLE" 400 300
+focus_regrabbed=0
+for _ in $(seq 1 100); do
+    if [[ "$("$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" \
+        window-grab-status "$TITLE")" == "grabbed" ]]; then
+        focus_regrabbed=1
+        break
+    fi
+    sleep 0.02
+done
+[[ "$focus_regrabbed" == "1" ]] || fail "focused guest grab was not reacquired"
+
+# SIGUSR2 is the emergency release path used by xenv.  It must release the
+# host pointer without waiting for the guest client to cooperate, and remain
+# inhibited until that guest grab ends.
+kill -USR2 "$xephyr_pid"
+host_released=0
+for _ in $(seq 1 100); do
+    if [[ "$("$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" \
+        window-grab-status "$TITLE")" == "free" ]]; then
+        host_released=1
+        break
+    fi
+    sleep 0.02
+done
+[[ "$host_released" == "1" ]] || fail "SIGUSR2 did not release the host grab"
+sleep 0.08
+[[ "$("$TEST_BUILD_DIR/pointer-control" "$HOST_DISPLAY" \
+    window-grab-status "$TITLE")" == "free" ]] ||
+    fail "emergency-released host grab was immediately reacquired"
+
+kill "$grab_pid"
+wait "$grab_pid" 2>/dev/null || true
+grab_pid=""
+
+echo "relative-pointer test: PASS (raw deltas, warp suppression, edge capture, emergency release)"

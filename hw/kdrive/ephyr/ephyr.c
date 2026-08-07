@@ -33,6 +33,8 @@
 #include "scrnintstr.h"
 #include "ephyrlog.h"
 
+#include <signal.h>
+
 #ifdef GLAMOR
 #include "glamor.h"
 #endif
@@ -46,9 +48,13 @@ KdKeyboardInfo *ephyrKbd;
 KdPointerInfo *ephyrMouse;
 Bool ephyrNoDRI = FALSE;
 Bool ephyrNoXV = FALSE;
+const char ephyrPointerCaptureCapability[] = "XEPHYR_POINTER_CAPTURE_V1";
 
 static int mouseState = 0;
 static Rotation ephyrRandr = RR_Rotate_0;
+static volatile sig_atomic_t ephyrHostPointerReleaseRequested = 0;
+static Bool ephyrHostPointerGrabInhibited = FALSE;
+ScreenPtr ephyrCursorScreen; /* screen containing the cursor */
 
 #define EPHYR_HOST_POINTER_WARP_GRACE_MS 500
 
@@ -59,10 +65,18 @@ typedef struct _EphyrInputPrivate {
 Bool EphyrWantGrayScale = 0;
 Bool EphyrWantResize = 0;
 
+static void
+ephyrRequestHostPointerRelease(int signum)
+{
+    (void) signum;
+    ephyrHostPointerReleaseRequested = 1;
+}
+
 Bool
 ephyrInitialize(KdCardInfo * card, EphyrPriv * priv)
 {
     OsSignal(SIGUSR1, hostx_handle_signal);
+    OsSignal(SIGUSR2, ephyrRequestHostPointerRelease);
 
     priv->base = 0;
     priv->bytes_per_line = 0;
@@ -344,6 +358,67 @@ ephyrEventWorkProc(ClientPtr client, void *closure)
     return TRUE;
 }
 
+static Bool
+ephyrGuestPointerGrabActive(void)
+{
+    DeviceIntPtr device;
+
+    for (device = inputInfo.devices; device; device = device->next) {
+        GrabPtr grab = device->deviceGrab.grab;
+
+        if (grab && IsPointerDevice(device) &&
+            !device->deviceGrab.fromPassiveGrab &&
+            !device->deviceGrab.implicitGrab) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static void
+ephyrSyncHostPointerGrab(KdScreenInfo *screen)
+{
+    EphyrScrPriv *scrpriv = screen->driver;
+    Bool guest_grabbed = ephyrGuestPointerGrabActive();
+    Bool current_screen = !ephyrCursorScreen ||
+                          ephyrCursorScreen == screen->pScreen;
+    Bool should_grab;
+    static int last_debug_state = -1;
+
+    if (ephyrHostPointerReleaseRequested) {
+        ephyrHostPointerReleaseRequested = 0;
+        ephyrHostPointerGrabInhibited = TRUE;
+        hostx_release_pointer_grab();
+    }
+
+    if (!guest_grabbed)
+        ephyrHostPointerGrabInhibited = FALSE;
+
+    should_grab = guest_grabbed && !ephyrHostPointerGrabInhibited &&
+                  current_screen && scrpriv->host_window_focused &&
+                  (scrpriv->host_pointer_inside ||
+                   scrpriv->host_pointer_grabbed);
+    if (getenv("XEPHYR_CAPTURE_DEBUG")) {
+        int debug_state = guest_grabbed |
+                          (ephyrHostPointerGrabInhibited << 1) |
+                          (current_screen << 2) |
+                          (scrpriv->host_window_focused << 3) |
+                          (scrpriv->host_pointer_inside << 4) |
+                          (scrpriv->host_pointer_grabbed << 5);
+
+        if (debug_state != last_debug_state) {
+            ErrorF("XEPHYR_CAPTURE guest=%d inhibited=%d current=%d focus=%d inside=%d host=%d should=%d\n",
+                   guest_grabbed, ephyrHostPointerGrabInhibited,
+                   current_screen, scrpriv->host_window_focused,
+                   scrpriv->host_pointer_inside,
+                   scrpriv->host_pointer_grabbed, should_grab);
+            last_debug_state = debug_state;
+        }
+    }
+    hostx_set_pointer_grab(screen, should_grab);
+}
+
 static void
 ephyrScreenBlockHandler(ScreenPtr pScreen, void *timeout)
 {
@@ -358,6 +433,8 @@ ephyrScreenBlockHandler(ScreenPtr pScreen, void *timeout)
 
     if (scrpriv->pDamage)
         ephyrInternalDamageRedisplay(pScreen);
+
+    ephyrSyncHostPointerGrab(screen);
 
     if (hostx_has_queued_event()) {
         if (!QueueWorkProc(ephyrEventWorkProc, NULL, NULL))
@@ -746,6 +823,9 @@ ephyrScreenFini(KdScreenInfo * screen)
 void
 ephyrCloseScreen(ScreenPtr pScreen)
 {
+    KdScreenPriv(pScreen);
+
+    hostx_set_pointer_grab(pScreenPriv->screen, FALSE);
     ephyrUnsetInternalDamage(pScreen);
 }
 
@@ -815,8 +895,6 @@ static void
 ephyrCrossScreen(ScreenPtr pScreen, Bool entering)
 {
 }
-
-ScreenPtr ephyrCursorScreen; /* screen containing the cursor */
 
 static void
 ephyrWarpCursor(DeviceIntPtr pDev, ScreenPtr pScreen, int x, int y)
@@ -916,6 +994,69 @@ ephyrConsumeHostPointerWarp(KdScreenInfo *screen,
     return FALSE;
 }
 
+static double
+ephyrFp3232ToDouble(xcb_input_fp3232_t value)
+{
+    return value.integral + value.frac / 4294967296.0;
+}
+
+static int
+ephyrRoundPointerDelta(double value)
+{
+    return value < 0.0 ? (int)(value - 0.5) : (int)(value + 0.5);
+}
+
+static void
+ephyrProcessHostRawMotion(xcb_generic_event_t *xev)
+{
+    xcb_input_raw_motion_event_t *raw =
+        (xcb_input_raw_motion_event_t *) xev;
+    uint32_t *valuator_mask =
+        xcb_input_raw_button_press_valuator_mask(raw);
+    xcb_input_fp3232_t *axisvalues =
+        xcb_input_raw_button_press_axisvalues(raw);
+    xcb_input_fp3232_t *axisvalues_raw =
+        xcb_input_raw_button_press_axisvalues_raw(raw);
+    KdScreenInfo *screen = hostx_pointer_grabbed_screen();
+    double dx = 0.0, dy = 0.0, raw_dx = 0.0, raw_dy = 0.0;
+    int value_index = 0;
+    int axis;
+
+    if (!screen || !ephyrMouse ||
+        !((EphyrPointerPrivate *) ephyrMouse->driverPrivate)->enabled) {
+        return;
+    }
+
+    for (axis = 0; axis < raw->valuators_len * 32; axis++) {
+        if (!(valuator_mask[axis / 32] & (1U << (axis % 32))))
+            continue;
+
+        if (axis == 0) {
+            dx = ephyrFp3232ToDouble(axisvalues[value_index]);
+            raw_dx = ephyrFp3232ToDouble(axisvalues_raw[value_index]);
+        }
+        else if (axis == 1) {
+            dy = ephyrFp3232ToDouble(axisvalues[value_index]);
+            raw_dy = ephyrFp3232ToDouble(axisvalues_raw[value_index]);
+        }
+        value_index++;
+    }
+
+    if (getenv("XEPHYR_CAPTURE_DEBUG")) {
+        ErrorF("XEPHYR_CAPTURE parsed mask=%08x,%08x processed=%f,%f raw=%f,%f\n",
+               valuator_mask[0], raw->valuators_len > 1 ? valuator_mask[1] : 0,
+               dx, dy, raw_dx, raw_dy);
+    }
+
+    if (raw_dx == 0.0 && raw_dy == 0.0 && dx == 0.0 && dy == 0.0)
+        return;
+
+    KdEnqueuePointerMotionWithRawDeltas(
+        ephyrMouse, mouseState | KD_MOUSE_DELTA,
+        ephyrRoundPointerDelta(dx), ephyrRoundPointerDelta(dy), 0,
+        raw_dx, raw_dy, 0.0);
+}
+
 static void
 ephyrProcessErrorEvent(xcb_generic_event_t *xev)
 {
@@ -979,6 +1120,18 @@ ephyrProcessMouseMotion(xcb_generic_event_t *xev)
         return;
     }
 
+    /*
+     * While a guest explicitly owns the pointer, host XI2 RawMotion is the
+     * authoritative movement source.  Core MotionNotify would duplicate it
+     * and becomes stationary at a host edge.
+     */
+    if (scrpriv->host_pointer_grabbed && hostx_has_xinput()) {
+        scrpriv->host_pointer_x = motion->event_x;
+        scrpriv->host_pointer_y = motion->event_y;
+        scrpriv->host_pointer_position_valid = TRUE;
+        return;
+    }
+
     if (ephyrCursorScreen != screen->pScreen) {
         EPHYR_LOG("warping mouse cursor. "
                   "cur_screen:%d, motion_screen:%d\n",
@@ -1014,6 +1167,16 @@ ephyrProcessMouseMotion(xcb_generic_event_t *xev)
         KdEnqueuePointerMotionWithRawDeltas(
             ephyrMouse, mouseState | KD_POINTER_DESKTOP, x, y, 0,
             dx, dy, 0);
+
+        /*
+         * Hosts without XI2 can still provide unbounded processed deltas by
+         * returning their pointer to the center after each captured motion.
+         */
+        if (scrpriv->host_pointer_grabbed && !hostx_has_xinput()) {
+            hostx_warp_pointer(screen->pScreen,
+                               scrpriv->win_width / 2,
+                               scrpriv->win_height / 2);
+        }
     }
 }
 
@@ -1114,6 +1277,67 @@ ephyrProcessConfigureNotify(xcb_generic_event_t *xev)
 }
 
 static void
+ephyrProcessFocusIn(xcb_generic_event_t *xev)
+{
+    xcb_focus_in_event_t *focus = (xcb_focus_in_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(focus->event);
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return;
+
+    scrpriv = screen->driver;
+    if (scrpriv)
+        scrpriv->host_window_focused = TRUE;
+}
+
+static void
+ephyrProcessFocusOut(xcb_generic_event_t *xev)
+{
+    xcb_focus_out_event_t *focus = (xcb_focus_out_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(focus->event);
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return;
+
+    scrpriv = screen->driver;
+    if (scrpriv)
+        scrpriv->host_window_focused = FALSE;
+    hostx_set_pointer_grab(screen, FALSE);
+}
+
+static void
+ephyrProcessEnterNotify(xcb_generic_event_t *xev)
+{
+    xcb_enter_notify_event_t *enter = (xcb_enter_notify_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(enter->event);
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return;
+
+    scrpriv = screen->driver;
+    if (scrpriv)
+        scrpriv->host_pointer_inside = TRUE;
+}
+
+static void
+ephyrProcessLeaveNotify(xcb_generic_event_t *xev)
+{
+    xcb_leave_notify_event_t *leave = (xcb_leave_notify_event_t *)xev;
+    KdScreenInfo *screen = screen_from_window(leave->event);
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return;
+
+    scrpriv = screen->driver;
+    if (scrpriv)
+        scrpriv->host_pointer_inside = FALSE;
+}
+
+static void
 ephyrXcbProcessEvents(Bool queued_only)
 {
     xcb_connection_t *conn = hostx_get_xcbconn();
@@ -1133,6 +1357,18 @@ ephyrXcbProcessEvents(Bool queued_only)
             }
 
             break;
+        }
+
+        if (hostx_is_xinput_raw_motion(xev)) {
+            if (getenv("XEPHYR_CAPTURE_DEBUG")) {
+                xcb_input_raw_motion_event_t *raw =
+                    (xcb_input_raw_motion_event_t *) xev;
+                ErrorF("XEPHYR_CAPTURE host RawMotion device=%u source=%u mask-len=%u\n",
+                       raw->deviceid, raw->sourceid, raw->valuators_len);
+            }
+            ephyrProcessHostRawMotion(xev);
+            free(xev);
+            continue;
         }
 
         switch (xev->response_type & 0x7f) {
@@ -1170,6 +1406,22 @@ ephyrXcbProcessEvents(Bool queued_only)
             free(configure);
             configure = xev;
             xev = NULL;
+            break;
+
+        case XCB_FOCUS_IN:
+            ephyrProcessFocusIn(xev);
+            break;
+
+        case XCB_FOCUS_OUT:
+            ephyrProcessFocusOut(xev);
+            break;
+
+        case XCB_ENTER_NOTIFY:
+            ephyrProcessEnterNotify(xev);
+            break;
+
+        case XCB_LEAVE_NOTIFY:
+            ephyrProcessLeaveNotify(xev);
             break;
         }
 

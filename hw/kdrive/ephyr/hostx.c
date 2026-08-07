@@ -77,6 +77,9 @@ struct EphyrHostXVars {
     Bool use_fullscreen;
     Bool have_shm;
     Bool have_shm_fd_passing;
+    Bool have_xinput;
+    uint8_t xinput_opcode;
+    KdScreenInfo *pointer_grabbed_screen;
 
     int n_screens;
     KdScreenInfo **screens;
@@ -207,6 +210,94 @@ hostx_pointer_warp_allowed(EphyrScrPriv *scrpriv)
 
     return scrpriv->host_pointer_warp_deadline &&
            (int)(now - scrpriv->host_pointer_warp_deadline) <= 0;
+}
+
+Bool
+hostx_set_pointer_grab(KdScreenInfo *screen, Bool grab)
+{
+    EphyrScrPriv *scrpriv;
+
+    if (!screen)
+        return FALSE;
+
+    scrpriv = screen->driver;
+    if (!scrpriv)
+        return FALSE;
+
+    if (!grab) {
+        if (HostX.pointer_grabbed_screen != screen)
+            return TRUE;
+
+        xcb_ungrab_pointer(HostX.conn, XCB_TIME_CURRENT_TIME);
+        xcb_flush(HostX.conn);
+        scrpriv->host_pointer_grabbed = FALSE;
+        HostX.pointer_grabbed_screen = NULL;
+        return TRUE;
+    }
+
+    if (HostX.pointer_grabbed_screen == screen)
+        return TRUE;
+
+    if (HostX.pointer_grabbed_screen)
+        hostx_release_pointer_grab();
+
+    {
+        xcb_grab_pointer_cookie_t cookie;
+        xcb_grab_pointer_reply_t *reply;
+        uint16_t event_mask = XCB_EVENT_MASK_BUTTON_PRESS |
+                              XCB_EVENT_MASK_BUTTON_RELEASE |
+                              XCB_EVENT_MASK_POINTER_MOTION;
+
+        cookie = xcb_grab_pointer(HostX.conn, TRUE, scrpriv->win,
+                                  event_mask,
+                                  XCB_GRAB_MODE_ASYNC,
+                                  XCB_GRAB_MODE_ASYNC,
+                                  scrpriv->win, XCB_NONE,
+                                  XCB_TIME_CURRENT_TIME);
+        reply = xcb_grab_pointer_reply(HostX.conn, cookie, NULL);
+        if (!reply || reply->status != XCB_GRAB_STATUS_SUCCESS) {
+            free(reply);
+            return FALSE;
+        }
+        free(reply);
+    }
+
+    scrpriv->host_pointer_grabbed = TRUE;
+    HostX.pointer_grabbed_screen = screen;
+    return TRUE;
+}
+
+void
+hostx_release_pointer_grab(void)
+{
+    KdScreenInfo *screen = HostX.pointer_grabbed_screen;
+
+    if (screen)
+        hostx_set_pointer_grab(screen, FALSE);
+}
+
+KdScreenInfo *
+hostx_pointer_grabbed_screen(void)
+{
+    return HostX.pointer_grabbed_screen;
+}
+
+Bool
+hostx_has_xinput(void)
+{
+    return HostX.have_xinput;
+}
+
+Bool
+hostx_is_xinput_raw_motion(const xcb_generic_event_t *event)
+{
+    const xcb_input_raw_motion_event_t *raw =
+        (const xcb_input_raw_motion_event_t *) event;
+
+    return HostX.have_xinput &&
+           (event->response_type & 0x7f) == XCB_GE_GENERIC &&
+           raw->extension == HostX.xinput_opcode &&
+           raw->event_type == XCB_INPUT_RAW_MOTION;
 }
 
 void
@@ -569,6 +660,64 @@ hostx_destroy_shm_segment(xcb_shm_segment_info_t *shminfo, size_t size)
     shminfo->shmaddr = NULL;
 }
 
+static void
+hostx_init_xinput(void)
+{
+    const xcb_query_extension_reply_t *extension;
+    xcb_input_xi_query_version_cookie_t version_cookie;
+    xcb_input_xi_query_version_reply_t *version_reply;
+    xcb_generic_error_t *error = NULL;
+    struct {
+        xcb_input_event_mask_t header;
+        uint32_t mask;
+    } event_mask = {
+        .header = {
+            .deviceid = XCB_INPUT_DEVICE_ALL_MASTER,
+            .mask_len = 1,
+        },
+        .mask = XCB_INPUT_XI_EVENT_MASK_RAW_MOTION,
+    };
+    xcb_void_cookie_t select_cookie;
+
+    HostX.have_xinput = FALSE;
+    extension = xcb_get_extension_data(HostX.conn, &xcb_input_id);
+    if (!extension || !extension->present) {
+        if (getenv("XEPHYR_CAPTURE_DEBUG"))
+            ErrorF("XEPHYR_CAPTURE host XI2 extension unavailable\n");
+        return;
+    }
+
+    version_cookie = xcb_input_xi_query_version(HostX.conn, 2, 0);
+    version_reply = xcb_input_xi_query_version_reply(HostX.conn,
+                                                     version_cookie,
+                                                     &error);
+    if (error || !version_reply || version_reply->major_version < 2) {
+        if (getenv("XEPHYR_CAPTURE_DEBUG"))
+            ErrorF("XEPHYR_CAPTURE host XI2 version query failed\n");
+        free(error);
+        free(version_reply);
+        return;
+    }
+    free(version_reply);
+
+    select_cookie = xcb_input_xi_select_events_checked(
+        HostX.conn, HostX.winroot, 1, &event_mask.header);
+    error = xcb_request_check(HostX.conn, select_cookie);
+    if (error) {
+        if (getenv("XEPHYR_CAPTURE_DEBUG"))
+            ErrorF("XEPHYR_CAPTURE host XI2 RawMotion selection failed code=%u\n",
+                   error->error_code);
+        free(error);
+        return;
+    }
+
+    HostX.xinput_opcode = extension->major_opcode;
+    HostX.have_xinput = TRUE;
+    if (getenv("XEPHYR_CAPTURE_DEBUG"))
+        ErrorF("XEPHYR_CAPTURE host XI2 RawMotion enabled opcode=%u\n",
+               HostX.xinput_opcode);
+}
+
 int
 hostx_init(void)
 {
@@ -591,6 +740,9 @@ hostx_init(void)
         | XCB_EVENT_MASK_POINTER_MOTION
         | XCB_EVENT_MASK_KEY_PRESS
         | XCB_EVENT_MASK_KEY_RELEASE
+        | XCB_EVENT_MASK_ENTER_WINDOW
+        | XCB_EVENT_MASK_LEAVE_WINDOW
+        | XCB_EVENT_MASK_FOCUS_CHANGE
         | XCB_EVENT_MASK_EXPOSURE
         | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
     attr_mask |= XCB_CW_EVENT_MASK;
@@ -609,6 +761,7 @@ hostx_init(void)
 
     xscreen = xcb_aux_get_screen(HostX.conn, HostX.screen);
     HostX.winroot = xscreen->root;
+    hostx_init_xinput();
     HostX.gc = xcb_generate_id(HostX.conn);
     HostX.depth = xscreen->root_depth;
 #ifdef GLAMOR

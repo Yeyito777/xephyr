@@ -95,6 +95,9 @@ typedef struct _ephyrScrPriv {
      */
     CARD32 host_pointer_warp_deadline;
 
+    Bool host_window_focused;
+    Bool host_pointer_inside;
+    Bool host_pointer_grabbed;
     Bool host_pointer_position_valid;
     int host_pointer_x;
     int host_pointer_y;

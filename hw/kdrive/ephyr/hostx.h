@@ -29,6 +29,7 @@
 #include <X11/X.h>
 #include <X11/Xmd.h>
 #include <xcb/xcb.h>
+#include <xcb/xinput.h>
 #include <xcb/render.h>
 #include "ephyr.h"
 
@@ -127,6 +128,21 @@ hostx_set_win_title(KdScreenInfo *screen, const char *extra_text);
 
 void
 hostx_warp_pointer(ScreenPtr pScreen, int x, int y);
+
+Bool
+hostx_set_pointer_grab(KdScreenInfo *screen, Bool grab);
+
+void
+hostx_release_pointer_grab(void);
+
+KdScreenInfo *
+hostx_pointer_grabbed_screen(void);
+
+Bool
+hostx_has_xinput(void);
+
+Bool
+hostx_is_xinput_raw_motion(const xcb_generic_event_t *event);
 
 int
  hostx_get_depth(void);
